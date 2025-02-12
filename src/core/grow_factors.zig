@@ -7,6 +7,16 @@ pub const GrowFactor = enum {
     super_linearly,
 };
 
+pub fn grow(comptime factor: GrowFactor, current: usize, minimum: usize) usize {
+    if (comptime factor == .one) {
+        return growOne(current, minimum);
+    } else if (comptime factor == .double) {
+        return growDouble(current, minimum);
+    } else if (comptime factor == .super_linearly) {
+        return growSuperLinearly(current, minimum);
+    }
+}
+
 pub inline fn growOne(current: usize, minimum: usize) usize {
     debug.assert(minimum > current);
     return minimum;
@@ -39,6 +49,14 @@ pub fn growSuperLinearly(current: usize, minimum: usize) usize {
         if (new >= minimum)
             return new;
     }
+}
+
+test "grow: takes correct function at comptime" {
+    const testing = std.testing;
+
+    try testing.expectEqual(1, grow(GrowFactor.one, 0, 1));
+    try testing.expectEqual(2, grow(GrowFactor.double, 0, 1));
+    try testing.expectEqual(8, grow(GrowFactor.super_linearly, 0, 1));
 }
 
 test "growOne: always returns minimum" {
