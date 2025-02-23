@@ -1,5 +1,5 @@
 const std = @import("std");
-const asserts = @import("asserts.zig");
+const assert = @import("assert");
 const debug = std.debug;
 const math = std.math;
 
@@ -8,7 +8,7 @@ const math = std.math;
 pub fn FixedDeque(comptime T: type, comptime size: usize) type {
     comptime debug.assert(size > 0);
     comptime debug.assert(size < math.maxInt(i32));
-    comptime debug.assert(asserts.isPowerOf2(size));
+    comptime debug.assert(assert.isPowerOf2(size));
 
     const mask: i32 = @intCast(size - 1);
 

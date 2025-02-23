@@ -1,6 +1,6 @@
 const std = @import("std");
 const debug = std.debug;
-const asserts = @import("asserts.zig");
+const assert = @import("assert");
 
 const Atomic = std.atomic.Value;
 const Thread = std.Thread;
@@ -31,7 +31,7 @@ pub fn JobQueue(comptime config: JobQueueConfig) type {
     comptime debug.assert(config.max_threads >= 2);
 
     // For optimization we only allow a count of a multiple of 2
-    comptime debug.assert(asserts.isPowerOf2(config.max_jobs_per_thread));
+    comptime debug.assert(assert.isPowerOf2(config.max_jobs_per_thread));
 
     const ExecData = [52]u8;
     const ExecFn = *const fn (*ExecData) void;
