@@ -5,11 +5,12 @@ const assert = @import("assert");
 const Atomic = std.atomic.Value;
 const Thread = std.Thread;
 const BoundedArray = std.BoundedArray;
+const BoundedArrayAligned = std.BoundedArrayAligned;
 const FixedDeque = @import("fixed_deque.zig").FixedDeque;
 
-pub const JobHandle = packed struct(u32) {
-    index: u16,
-    thread: u16,
+pub const JobHandle = packed struct(u16) {
+    index: u11,
+    thread: u5,
 };
 
 pub const JobQueueConfig = struct {
@@ -25,35 +26,33 @@ pub const JobQueueConfig = struct {
 };
 
 pub fn JobQueue(comptime config: JobQueueConfig) type {
-    const cache_line_size = 64;
-
     // Should atleast have 2 threads to be able to spawn
     comptime debug.assert(config.max_threads >= 2);
 
     // For optimization we only allow a count of a multiple of 2
     comptime debug.assert(assert.isPowerOf2(config.max_jobs_per_thread));
 
-    const ExecData = [52]u8;
+    const ExecData = [76]u8;
     const ExecFn = *const fn (*ExecData) void;
 
     const Job = struct {
         const Self = @This();
 
         // The function to call
-        exec: ExecFn align(cache_line_size),
-
-        // Data passed to the function
-        data: ExecData,
+        exec: ExecFn,
 
         // Parent job that spawned this job, can be executed in parallel of this job
         parent: ?JobHandle,
 
         // Jobs that need to be awaited before this job is completed, can be executed in parallel of this job
-        job_count: u32,
+        job_count: u16,
 
         // Child jobs, these need to be executed after this job has run
-        child_count: u32,
-        child_jobs: [14]JobHandle,
+        child_count: u16,
+        child_jobs: [16]JobHandle,
+
+        // Data passed to the function
+        data: ExecData,
 
         pub fn init(comptime T: type, job: *const T) Self {
             var self: Self = .{
@@ -62,7 +61,7 @@ pub fn JobQueue(comptime config: JobQueueConfig) type {
                 .parent = undefined,
                 .job_count = 1,
                 .child_count = 0,
-                .child_jobs = .{undefined} ** 14,
+                .child_jobs = .{undefined} ** 16,
             };
 
             const bytes = std.mem.asBytes(job);
@@ -76,11 +75,9 @@ pub fn JobQueue(comptime config: JobQueueConfig) type {
         }
 
         pub fn isCompleted(self: *const Self) bool {
-            return @atomicLoad(u32, &self.job_count, .monotonic) == 0;
+            return @atomicLoad(u16, &self.job_count, .monotonic) == 0;
         }
     };
-
-    // comptime debug.assert(@sizeOf(Job) == 128);
 
     return struct {
         pub const max_jobs_per_thread = config.max_jobs_per_thread;
@@ -90,7 +87,7 @@ pub fn JobQueue(comptime config: JobQueueConfig) type {
 
         const Self = @This();
         const Deque = FixedDeque(*Job, max_jobs_per_thread);
-        const Jobs = BoundedArray(Job, max_jobs_per_thread);
+        const Jobs = BoundedArrayAligned(Job, 128, max_jobs_per_thread);
 
         const jobs_per_thread_mask = max_jobs_per_thread - 1;
 
@@ -98,6 +95,7 @@ pub fn JobQueue(comptime config: JobQueueConfig) type {
         // itself is not thread local
         threadlocal var thread_queue_index: u32 = 0;
 
+        /// Allocator used in init and deinit functions for allocating job buffers and queues
         allocator: std.mem.Allocator,
 
         // Each thread has it's own job buffer containing max_jobs_per_thread jobs.
@@ -118,7 +116,8 @@ pub fn JobQueue(comptime config: JobQueueConfig) type {
         // The picked up jobs will be completed
         is_running: Atomic(bool) = .{ .raw = false },
 
-        pub fn init(allocator: std.mem.Allocator) !Self {
+        /// Needs to be called before any other function
+        pub fn init(allocator: std.mem.Allocator) std.mem.Allocator.Error!Self {
             const thread_count = @min(max_thread_count, (Thread.getCpuCount() catch 2) - 1);
             const thread_queue_count = thread_count + 1;
 
@@ -137,6 +136,7 @@ pub fn JobQueue(comptime config: JobQueueConfig) type {
             return self;
         }
 
+        /// Needs to be called as last to cleanup memory
         pub fn deinit(self: *Self) void {
             const is_running = self.is_running.load(.monotonic);
             debug.assert(is_running == false);
@@ -146,6 +146,8 @@ pub fn JobQueue(comptime config: JobQueueConfig) type {
             self.allocator.free(self.threads);
         }
 
+        /// Starts the threads, from this call onwards the threads will try to pickup jobs from their
+        /// queues.
         pub fn start(self: *Self) !void {
             const current_thread = Thread.getCurrentId();
             const prev_thread = self.main_thread.swap(current_thread, .monotonic);
@@ -159,11 +161,15 @@ pub fn JobQueue(comptime config: JobQueueConfig) type {
             }
         }
 
+        /// Stops the threads from listening to the queues, they will not pickup any new jobs from the
+        /// queue, meaning that not all jobs will be finished.
         pub fn stop(self: *Self) void {
             const was_running = self.is_running.swap(false, .monotonic);
             debug.assert(was_running);
         }
 
+        /// Joins all threads again, you can call this before stop but than a Job on another thread
+        /// will need to call stop, otherwise this will wait indefinatley
         pub fn join(self: *Self) void {
             debug.assert(self.isMainThread());
 
@@ -172,6 +178,7 @@ pub fn JobQueue(comptime config: JobQueueConfig) type {
             }
         }
 
+        /// Allocates a Job, needs to be called in order to get a valid handle that can than be scheduled
         pub fn allocate(self: *Self, job: anytype) JobHandle {
             const JobType = @TypeOf(job);
 
@@ -188,6 +195,7 @@ pub fn JobQueue(comptime config: JobQueueConfig) type {
             };
         }
 
+        /// Puts the job in a queue so it can be picked up by a thread
         pub fn schedule(self: *Self, handle: JobHandle) void {
             const queue = self.getThreadQueue();
             const job = self.getJobFromBuffer(handle);
@@ -195,6 +203,7 @@ pub fn JobQueue(comptime config: JobQueueConfig) type {
             queue.push(job);
         }
 
+        /// awaits the job to finish and while not finished yet will work on other jobs.
         pub fn wait(self: *Self, handle: JobHandle) void {
             const job = self.getJobFromBuffer(handle);
             while (!job.isCompleted()) {
@@ -202,6 +211,8 @@ pub fn JobQueue(comptime config: JobQueueConfig) type {
             }
         }
 
+        /// awaits the job to finish and while not finished yet will work on other jobs. This will
+        /// return the result of the job. A simpler and slightly faster way of calling 'wait' and then 'result'.
         pub fn waitResult(self: *Self, T: type, handle: JobHandle) T {
             const job = self.getJobFromBuffer(handle);
             while (!job.isCompleted()) {
@@ -210,12 +221,34 @@ pub fn JobQueue(comptime config: JobQueueConfig) type {
             return std.mem.bytesToValue(T, &job.data);
         }
 
+        /// returns the result of a completed job. asserts the job has actually been completed.
         pub fn result(self: *Self, T: type, handle: JobHandle) T {
             debug.assert(self.isCompleted(handle));
             const job = self.getJobFromBuffer(handle);
             return std.mem.bytesToValue(T, &job.data);
         }
 
+        /// adds a job that will run after the main job has completed, multiple jobs can be added, they
+        /// will be executed after the main job in same order of calling this function.
+        pub fn continueWith(self: *Self, handle: JobHandle, continuation_handle: JobHandle) void {
+            const parent = self.getJobFromBuffer(handle);
+            const prev = @atomicRmw(u16, &parent.child_count, .Add, 1, .monotonic);
+            parent.child_jobs[prev] = continuation_handle;
+            debug.assert(prev < 16);
+        }
+
+        /// allows to await multiple jobs through a single job. once the finish_handle is awaited, all other jobs are
+        /// guaranteed to be finished as well, though it does not enforce execution order. the 'finish job' function could be executed
+        /// as first but will not be set to completed until all related jobs have finished executing.
+        pub fn finishWith(self: *Self, handle: JobHandle, finish_handle: JobHandle) void {
+            const child = self.getJobFromBuffer(handle);
+            const parent = self.getJobFromBuffer(finish_handle);
+            _ = @atomicRmw(u16, &parent.job_count, .Add, 1, .monotonic);
+
+            child.parent = finish_handle;
+        }
+
+        /// returns of the current thread is the main thread
         pub fn isMainThread(self: *Self) bool {
             const current_thread = Thread.getCurrentId();
             const main_thread = self.main_thread.load(.monotonic);
@@ -224,6 +257,7 @@ pub fn JobQueue(comptime config: JobQueueConfig) type {
             return main_thread == current_thread;
         }
 
+        /// returns whether the passed job has been completed
         pub fn isCompleted(self: *const Self, handle: JobHandle) bool {
             const job = self.getJobFromBufferConst(handle);
             return job.isCompleted();
@@ -267,11 +301,17 @@ pub fn JobQueue(comptime config: JobQueueConfig) type {
         }
 
         fn finishJob(self: *Self, job: *Job) void {
-            const prev = @atomicRmw(u32, &job.job_count, .Sub, 1, .monotonic);
+            const prev = @atomicRmw(u16, &job.job_count, .Sub, 1, .monotonic);
             if (prev == 1) {
                 if (job.parent) |parent| {
                     const parent_job = self.getJobFromBuffer(parent);
                     self.finishJob(parent_job);
+                }
+
+                for (0..job.child_count) |i| {
+                    const child_job = self.getJobFromBuffer(job.child_jobs[i]);
+                    const queue = self.getThreadQueue();
+                    queue.push(child_job);
                 }
             }
         }
@@ -285,13 +325,11 @@ pub fn JobQueue(comptime config: JobQueueConfig) type {
         }
 
         inline fn getJobFromBuffer(self: *Self, handle: JobHandle) *Job {
-            debug.assert(handle.thread == thread_queue_index);
-            return &self.jobs[thread_queue_index].buffer[handle.index];
+            return &self.jobs[handle.thread].buffer[handle.index];
         }
 
         inline fn getJobFromBufferConst(self: *const Self, handle: JobHandle) *const Job {
-            debug.assert(handle.thread == thread_queue_index);
-            return &self.jobs[thread_queue_index].buffer[handle.index];
+            return &self.jobs[handle.thread].buffer[handle.index];
         }
     };
 }
@@ -336,12 +374,20 @@ test "JobQueue: can join before stop" {
     var jobs = try JobQueue(config).init(allocator);
     defer jobs.deinit();
 
+    const StopJob = struct {
+        jobs: *@TypeOf(jobs),
+        pub fn exec(self: *@This()) void {
+            self.jobs.stop();
+        }
+    };
+
     try jobs.start();
     try testing.expectEqual(true, jobs.is_running.raw);
 
-    // TODO: add job to join threads
-    // jobs.join();
-    jobs.stop();
+    const stop_job = jobs.allocate(StopJob{ .jobs = &jobs });
+    jobs.schedule(stop_job);
+    jobs.join();
+
     try testing.expectEqual(false, jobs.is_running.raw);
 }
 
@@ -586,4 +632,113 @@ test "JobQueue: jobs are spread out over all threads" {
     }
 
     try testing.expectEqual(0, jobs.getThreadQueue().len());
+}
+
+test "JobQueue: finishWith job can be used to build up tree structure and awaited in one go" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const config: JobQueueConfig = .{
+        .max_jobs_per_thread = 256,
+    };
+    var jobs = try JobQueue(config).init(allocator);
+    defer jobs.deinit();
+
+    try jobs.start();
+    defer jobs.join();
+    defer jobs.stop();
+
+    const Root = struct {
+        pub fn exec(_: *@This()) void {}
+    };
+
+    const Child = struct {
+        pub fn exec(_: *@This()) void {}
+    };
+
+    const root = jobs.allocate(Root{});
+    // This is a very efficient way as we can already run child jobs while we are scheduling them.
+    for (0..255) |_| {
+        const child = jobs.allocate(Child{});
+        jobs.finishWith(child, root);
+        jobs.schedule(child);
+    }
+    jobs.schedule(root);
+    jobs.wait(root);
+
+    try testing.expectEqual(true, jobs.isCompleted(root));
+}
+
+test "JobQueue: continueWith jobs can be added and are run in order after completion main job" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const config: JobQueueConfig = .{
+        .max_jobs_per_thread = 4,
+    };
+    var jobs = try JobQueue(config).init(allocator);
+    defer jobs.deinit();
+
+    var data: [3]u8 = undefined;
+    var index: usize = 0;
+
+    const Parent = struct {
+        result: []u8,
+        index: *usize,
+
+        pub fn exec(self: *@This()) void {
+            self.result[self.index.*] = 1;
+            self.index.* += 1;
+        }
+    };
+
+    const Child = struct {
+        result: []u8,
+        index: *usize,
+
+        pub fn exec(self: *@This()) void {
+            self.result[self.index.*] = 2;
+            self.index.* += 1;
+        }
+    };
+
+    const Child1 = struct {
+        result: []u8,
+        index: *usize,
+
+        pub fn exec(self: *@This()) void {
+            self.result[self.index.*] = 3;
+            // self.index.* += 1;
+        }
+    };
+
+    const parent_job: Parent = .{
+        .result = &data,
+        .index = &index,
+    };
+
+    const parent = jobs.allocate(parent_job);
+
+    const child_job: Child = .{
+        .result = &data,
+        .index = &index,
+    };
+    const child = jobs.allocate(child_job);
+
+    const child1_job: Child1 = .{
+        .result = &data,
+        .index = &index,
+    };
+    const child1 = jobs.allocate(child1_job);
+
+    jobs.continueWith(parent, child);
+    jobs.continueWith(child, child1);
+
+    try jobs.start();
+    defer jobs.join();
+    defer jobs.stop();
+
+    jobs.schedule(parent);
+
+    const result = jobs.waitResult(Parent, parent);
+    const expected: [3]u8 = .{ 1, 2, 3 };
+    try testing.expectEqualSlices(u8, &expected, result.result);
 }

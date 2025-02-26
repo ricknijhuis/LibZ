@@ -30,7 +30,6 @@ pub fn FixedDeque(comptime T: type, comptime size: usize) type {
         pub fn push(self: *Self, value: T) void {
             const b = self.bottom;
             debug.assert((b - self.top) < size);
-            // Might need some kind of compiler barrier here
             self.buffer[@intCast(b & mask)] = value;
             self.bottom = b + 1;
         }
@@ -38,7 +37,7 @@ pub fn FixedDeque(comptime T: type, comptime size: usize) type {
         pub fn pop(self: *Self) ?T {
             const b = self.bottom - 1;
 
-            _ = @atomicRmw(i32, &self.bottom, .Xchg, b, .release);
+            _ = @atomicRmw(i32, &self.bottom, .Xchg, b, .seq_cst);
 
             const t = self.top;
 
@@ -47,7 +46,7 @@ pub fn FixedDeque(comptime T: type, comptime size: usize) type {
                 if (t != b) {
                     return item;
                 }
-                if (@cmpxchgStrong(i32, &self.top, t, t + 1, .release, .monotonic) == t) {
+                if (@cmpxchgStrong(i32, &self.top, t, t + 1, .seq_cst, .seq_cst) != null) {
                     item = null;
                 }
 
@@ -64,7 +63,7 @@ pub fn FixedDeque(comptime T: type, comptime size: usize) type {
             const b = self.bottom;
             if (t < b) {
                 const item = self.buffer[@intCast(t & mask)];
-                if (@cmpxchgStrong(i32, &self.top, t, t + 1, .release, .monotonic) == t) {
+                if (@cmpxchgStrong(i32, &self.top, t, t + 1, .seq_cst, .seq_cst) != null) {
                     return null;
                 }
                 return item;
