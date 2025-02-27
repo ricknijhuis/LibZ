@@ -742,3 +742,13 @@ test "JobQueue: continueWith jobs can be added and are run in order after comple
     const expected: [3]u8 = .{ 1, 2, 3 };
     try testing.expectEqualSlices(u8, &expected, result.result);
 }
+
+test "Example" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const config: JobQueueConfig = .{
+        .max_jobs_per_thread = 4,
+    };
+    var jobs = try JobQueue(config).init(allocator);
+    defer jobs.deinit();
+}
