@@ -2,8 +2,6 @@
 
 A utility library written in zig.
 
-
-
 ## Features
 
 - Multithreaded job queue implementation.
@@ -24,7 +22,8 @@ const zlib_lib = zlib_dep.artifact("ZLib");
 ```
 ## Usage/Examples
 
-## JobQueue simple usage
+## JobQueue: Simple usage
+Here we have a basic sample of how the jobqueue can be used.
 ```zig
     const testing = std.testing;
     const allocator = testing.allocator;
@@ -45,10 +44,10 @@ const zlib_lib = zlib_dep.artifact("ZLib");
     // might be best to use a pointer to store to some allocated memory.
     const Job = struct {
         // this function is required. you can discard the parameter if not needed by using the _ syntax.
-        pub fn exec(self: *@This()) void {
+        pub fn exec(_: *@This()) void {
             std.debug.print("hello", .{});
         }
-    }
+    };
 
     // Let's allocate our job, this is very fast as it uses a circular buffer pool to allocate
     // jobs from. Each thread has it's own pool so allocating can be done lock free.
@@ -74,11 +73,72 @@ const zlib_lib = zlib_dep.artifact("ZLib");
     jobs.stop();
 
     // Here we call thread.join on all our threads,
-    // if stop is not called it will block the calling thread indefinetley.
+    // if stop is not called it will block the calling thread indefinitely.
     // you can always call join though and call stop from another thread.
     // A nicer way to do this might be using something like:
     // defer jobs.join();
     // defer jobs.stop();
     jobs.join();
+```
+
+## JobQueue: Jobs with dependency jobs.
+This sample shows how jobs can have other jobs that will continue it's work, this allows to split certain tasks
+in more jobs than 1. The order of execution is defined by calling continueWith, here you basically say, once this job is done, continue with this job.
+```zig
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const config: JobQueueConfig = .{
+        .max_jobs_per_thread = 4,
+    };
+    var jobs = try JobQueue(config).init(allocator);
+    defer jobs.deinit();
+
+    // This will be our starting jobs. our other jobs will be called after this one succeeded.
+    const RootJob = struct {
+        pub fn exec(_: *@This()) void {
+            std.debug.print("Job: {s} executed\n", .{@typeName(@This())});
+        }
+    };
+
+    // This job will run after RootJob
+    const ContinueJob1 = struct {
+        pub fn exec(_: *@This()) void {
+            std.debug.print("Job: {s} executed\n", .{@typeName(@This())});
+        }
+    };
+
+    // This job will run after Continue1Job
+    const ContinueJob2 = struct {
+        pub fn exec(_: *@This()) void {
+            std.debug.print("Job: {s} executed\n", .{@typeName(@This())});
+        }
+    };
+
+    const root = jobs.allocate(RootJob{});
+    const continue1 = jobs.allocate(ContinueJob1{});
+    const continue2 = jobs.allocate(ContinueJob2{});
+
+    // Here we specify that continue1 job should be scheduled after root has been completed.
+    // The job can still be picked up by any thread.
+    // This can be done multiple times. The jobs will be scheduled in order of function call.
+    jobs.continueWith(root, continue1);
+
+    // Here we specify that continue2 job should run after continue1 job has been completed.
+    jobs.continueWith(continue1, continue2);
+
+    // We only need to schedule the root job, as once that is finished it will schedule all
+    // continueWith jobs.
+    jobs.schedule(root);
+
+    // Now we startup the threads, they will pickup the root job.
+    try jobs.start();
+
+    defer jobs.join();
+    defer jobs.stop();
+
+    // Let's await the continue2 job, because we know this one will be scheduled after
+    // the root and continue1 job have been completed, awaiting this will ensure all
+    // jobs are done executing.
+    jobs.wait(continue2);
 ```
 
