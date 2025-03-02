@@ -81,7 +81,7 @@ Here we have a basic sample of how the jobqueue can be used.
     jobs.join();
 ```
 
-## JobQueue: Jobs with dependency jobs.
+## JobQueue: continueJobs.
 This sample shows how jobs can have other jobs that will continue it's work, this allows to split certain tasks
 in more jobs than 1. The order of execution is defined by calling continueWith, here you basically say, once this job is done, continue with this job.
 ```zig
@@ -142,3 +142,9 @@ in more jobs than 1. The order of execution is defined by calling continueWith, 
     jobs.wait(continue2);
 ```
 
+## JobQueue: finishWith 
+This sample shows how you can define a single job that you can use to await multiple jobs.
+One use case for this could be updating a large buffer of data. you can split the buffer so each job can work on part of it.
+but by using finishWith you can have a single job that you can await to know the entire buffer is updated.
+```zig
+```

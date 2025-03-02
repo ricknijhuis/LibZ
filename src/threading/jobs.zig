@@ -851,3 +851,42 @@ test "Readme continueWith example" {
     // jobs are done executing.
     jobs.wait(continue2);
 }
+
+test "Readme finishWith" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const config: JobQueueConfig = .{
+        .max_jobs_per_thread = 4,
+    };
+    var jobs = try JobQueue(config).init(allocator);
+    defer jobs.deinit();
+
+    const buffer: [256]u8 = undefined;
+
+    const RootJob = struct {
+        slice: []const u8,
+        pub fn exec(self: *@This()) void {}
+    };
+
+    const UpdateBufferJob = struct {
+        value: u8,
+        slice: []const u8,
+        pub fn exec(self: *@This()) void {
+            @memset(slice, value);
+        }
+    };
+
+    // We are still responsible of scheduling all the child jobs.
+    // This is a very efficient way of scheduling them, this because we now can
+    // already work on jobs while scheduling them on the main thread.
+    for (0..255) |_| {
+        const child = jobs.allocate(Child{});
+        // Here we basically say, if root is finished, so will this job.
+        jobs.finishWith(child, root);
+        // Let's schedule it so our worker threads can already pick it up while
+        // we are continue scheduling on the main thread.
+        jobs.schedule(child);
+    }
+    jobs.schedule(root);
+    jobs.wait(root);
+}
